@@ -32,6 +32,13 @@ $ python train.py
 
 Edit `train.py` to whatever for your research desires
 
+## Todo
+
+- [ ] condition on mask
+- [ ] condition on MSA transformers (with caching of tensors in specified directory by protein id)
+- [ ] reach for size 384
+- [ ] all-attention network with uformer https://arxiv.org/abs/2106.03106 (with 1d + 2d conv kernels)
+
 ## Usage
 
 ```python

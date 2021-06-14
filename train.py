@@ -16,7 +16,7 @@ IMAGE_SIZE = 256
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATE_EVERY = 8
 LEARNING_RATE = 2e-5
-VALIDATE_EVERY = 100
+SAMPLE_EVERY = 100
 SCALE_DISTANCE_BY = 1e2
 
 # experimental tracker
@@ -90,7 +90,7 @@ for ind in range(NUM_ITERATIONS):
     opt.step()
     opt.zero_grad()
 
-    if (ind % VALIDATE_EVERY) == 0:
+    if (ind % SAMPLE_EVERY) == 0:
         sampled = diffusion.sample(batch_size = 1)[0][0]
 
         sampled = sampled.clamp(0., 1.) * upper_triangular_mask
