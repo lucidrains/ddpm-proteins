@@ -120,15 +120,6 @@ class Downsample(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
-class Rezero(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-        self.g = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x):
-        return self.fn(x) * self.g
-
 # building block modules
 
 class Block(nn.Module):
@@ -163,15 +154,20 @@ class ResnetBlock(nn.Module):
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads = 4, dim_head = 32):
         super().__init__()
+        self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
+        self.norm = nn.InstanceNorm2d(affine = True)
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x):
         b, c, h, w = x.shape
-        qkv = self.to_qkv(x)
-        q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)', heads = self.heads, qkv=3)
+        x = self.norm(x)
+        qkv = self.to_qkv(x).chunk(3, dim = 1)
+        q, k, v = map(lambda t: rearrange(t, 'b (heads c) h w -> b heads c (h w)', heads = self.heads), (q, k, v))
+        q = q * self.scale
+
         k = k.softmax(dim=-1)
         context = torch.einsum('bhdn,bhen->bhde', k, v)
         out = torch.einsum('bhde,bhdn->bhen', context, q)
@@ -212,13 +208,13 @@ class Unet(nn.Module):
             self.downs.append(nn.ModuleList([
                 ResnetBlock(dim_in, dim_out, time_emb_dim = dim),
                 ResnetBlock(dim_out, dim_out, time_emb_dim = dim),
-                Residual(Rezero(LinearAttention(dim_out))),
+                Residual(LinearAttention(dim_out)),
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = dims[-1]
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = dim)
-        self.mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
+        self.mid_attn = Residual(LinearAttention(mid_dim))
         self.mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = dim)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
@@ -227,7 +223,7 @@ class Unet(nn.Module):
             self.ups.append(nn.ModuleList([
                 ResnetBlock(dim_out * 2, dim_in, time_emb_dim = dim),
                 ResnetBlock(dim_in, dim_in, time_emb_dim = dim),
-                Residual(Rezero(LinearAttention(dim_in))),
+                Residual(LinearAttention(dim_in)),
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
