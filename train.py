@@ -19,10 +19,10 @@ LEARNING_RATE = 2e-5
 SAMPLE_EVERY = 100
 SCALE_DISTANCE_BY = 1e2
 
-# experimental tracker
+# experiment tracker
 
 import wandb
-wandb.init(project = 'ddpm-proteins')
+wandb.init(project = 'ddpm-proteins-masked')
 wandb.run.name = f'proteins of length {IMAGE_SIZE} or less'
 wandb.run.save()
 
@@ -32,11 +32,11 @@ model = Unet(
     dim = 64,
     dim_mults = (1, 2, 4, 8),
     channels = 1,
+    condition_dim = 1
 )
 
 diffusion = GaussianDiffusion(
     model,
-    channels = 1,
     image_size = IMAGE_SIZE,
     timesteps = 1000,   # number of steps
     loss_type = 'l1'    # L1 or L2
@@ -57,7 +57,9 @@ data = scn.load(
 )
 
 opt = optim.Adam(diffusion.parameters(), lr = LEARNING_RATE)
-dl = cycle(data['train'], thres = IMAGE_SIZE)
+
+train_dl = cycle(data['train'], thres = IMAGE_SIZE)
+valid_dl = cycle(data['test'], thres = IMAGE_SIZE)
 
 diffusion = diffusion.cuda()
 
@@ -65,24 +67,27 @@ upper_triangular_mask = torch.ones(IMAGE_SIZE, IMAGE_SIZE).triu_(1).bool().cuda(
 
 for ind in range(NUM_ITERATIONS):
     for _ in range(GRADIENT_ACCUMULATE_EVERY):
-        batch = next(dl)
-
+        batch = next(train_dl)
         seqs, coords, masks = batch.seqs, batch.crds, batch.msks
+
         coords = coords.reshape(BATCH_SIZE, -1, 14, 3)
         coords = coords[:, :, 1].cuda() # pick off alpha carbon
-        masks = masks.cuda()
 
         dist = torch.cdist(coords, coords)
-        dist.masked_fill_((masks[:, :, None] - masks[:, None, :]).bool(), 0.)
         data = dist[:, None, :, :]
+
+        crossed_mask = (masks[:, None, :, None] * masks[:, None, None, :]).cuda()
+        data.masked_fill_(~crossed_mask.bool(), 0.)
 
         remainder = IMAGE_SIZE - data.shape[-1]
         data = F.pad(data, (0, remainder, 0, remainder), value = 0.)
+        crossed_mask = F.pad(crossed_mask, (0, remainder, 0, remainder), value = -1.)
+
         data = (data / SCALE_DISTANCE_BY).clamp(0., 1.)
 
         data = data * upper_triangular_mask[None, None, :, :]
 
-        loss = diffusion(data)
+        loss = diffusion(data, condition_tensor = crossed_mask.float())
         (loss / GRADIENT_ACCUMULATE_EVERY).backward()
 
     print(loss.item())
@@ -91,7 +96,14 @@ for ind in range(NUM_ITERATIONS):
     opt.zero_grad()
 
     if (ind % SAMPLE_EVERY) == 0:
-        sampled = diffusion.sample(batch_size = 1)[0][0]
+        batch = next(valid_dl)
+        seqs, coords, masks = batch.seqs, batch.crds, batch.msks
+
+        crossed_mask = (masks[:, None, :, None] * masks[:, None, None, :]).cuda()
+        remainder = IMAGE_SIZE - crossed_mask.shape[-1]
+        crossed_mask = F.pad(crossed_mask, (0, remainder, 0, remainder), value = -1.)[:1].float()
+
+        sampled = diffusion.sample(batch_size = 1, condition_tensor = crossed_mask)[0][0]
 
         sampled = sampled.clamp(0., 1.) * upper_triangular_mask
         sampled = sampled.cpu().numpy()
@@ -102,5 +114,12 @@ for ind in range(NUM_ITERATIONS):
         figure.savefig('./validation.tmp.png', dpi = 100)
         plt.clf()
 
+        crossed_mask_img = sn.heatmap(crossed_mask[0][0].cpu().numpy())
+        figure = crossed_mask_img.get_figure()
+        figure.savefig('./mask.tmp.png', dpi = 100)
+        plt.clf()
+
         img = Image.open('./validation.tmp.png')
-        wandb.log({'sample': wandb.Image(img)})
+        crossed_mask_img = Image.open('./mask.tmp.png')
+
+        wandb.log({'sample': wandb.Image(img), 'mask': wandb.Image(crossed_mask_img)})
