@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'ddpm-proteins',
   packages = find_packages(),
-  version = '0.0.4',
+  version = '0.0.5',
   license='MIT',
   description = 'Denoising Diffusion Probabilistic Models - for Proteins - Pytorch',
   author = 'Phil Wang',
