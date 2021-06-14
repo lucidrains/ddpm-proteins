@@ -7,7 +7,7 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 from torch import optim
-from denoising_diffusion_pytorch import Unet, GaussianDiffusion
+from ddpm_proteins import Unet, GaussianDiffusion
 
 # constants
 

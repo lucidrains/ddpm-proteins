@@ -54,6 +54,24 @@ def num_to_groups(num, divisor):
         arr.append(remainder)
     return arr
 
+def broadcat(tensors, dim = -1):
+    num_tensors = len(tensors)
+    shape_lens = set(list(map(lambda t: len(t.shape), tensors)))
+    assert len(shape_lens) == 1, 'tensors must all have the same number of dimensions'
+    shape_len = list(shape_lens)[0]
+
+    dim = (dim + shape_len) if dim < 0 else dim
+    dims = list(zip(*map(lambda t: list(t.shape), tensors)))
+
+    expandable_dims = [(i, val) for i, val in enumerate(dims) if i != dim]
+    assert all([*map(lambda t: len(set(t[1])) <= 2, expandable_dims)]), 'invalid dimensions for broadcastable concatentation'
+    max_dims = list(map(lambda t: (t[0], max(t[1])), expandable_dims))
+    expanded_dims = list(map(lambda t: (t[0], (t[1],) * num_tensors), max_dims))
+    expanded_dims.insert(dim, (dim, dims[dim]))
+    expandable_shapes = list(zip(*map(lambda t: t[1], expanded_dims)))
+    tensors = list(map(lambda t: t[0].expand(*t[1]), zip(tensors, expandable_shapes)))
+    return torch.cat(tensors, dim = dim)
+
 def loss_backwards(fp16, loss, optimizer, **kwargs):
     if fp16:
         with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -157,14 +175,14 @@ class LinearAttention(nn.Module):
         self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
-        self.norm = nn.InstanceNorm2d(affine = True)
+        self.norm = nn.InstanceNorm2d(dim, affine = True)
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x):
         b, c, h, w = x.shape
         x = self.norm(x)
-        qkv = self.to_qkv(x).chunk(3, dim = 1)
+        q, k, v = self.to_qkv(x).chunk(3, dim = 1)
         q, k, v = map(lambda t: rearrange(t, 'b (heads c) h w -> b heads c (h w)', heads = self.heads), (q, k, v))
         q = q * self.scale
 
@@ -183,12 +201,16 @@ class Unet(nn.Module):
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
         groups = 8,
-        channels = 3
+        channels = 3,
+        condition_dim = 0
     ):
         super().__init__()
         self.channels = channels
+        self.condition_dim = condition_dim
 
-        dims = [channels, *map(lambda m: dim * m, dim_mults)]
+        input_channels = channels + condition_dim # allow for conditioning, to prepare for MSA Transformers
+
+        dims = [input_channels, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
         self.time_pos_emb = SinusoidalPosEmb(dim)
@@ -290,12 +312,15 @@ class GaussianDiffusion(nn.Module):
         *,
         image_size,
         channels = 3,
+        condition_dim = 0.,
         timesteps = 1000,
         loss_type = 'l1',
         betas = None
     ):
         super().__init__()
         self.channels = channels
+        self.condition_dim = condition_dim
+
         self.image_size = image_size
         self.denoise_fn = denoise_fn
 
@@ -357,8 +382,14 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(self, x, t, clip_denoised: bool):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.denoise_fn(x, t))
+    def p_mean_variance(self, x, t, clip_denoised = True, condition_tensor = None):
+        denoise_fn_input = x
+        if exists(condition_tensor):
+            denoise_fn_input = broadcat((condition_tensor, x), dim = 1)
+
+        denoise_fn_output = self.denoise_fn(denoise_fn_input, t)
+
+        x_recon = self.predict_start_from_noise(x, t = t, noise = denoise_fn_output)
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -367,30 +398,33 @@ class GaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
+    def p_sample(self, x, t, clip_denoised = True, repeat_noise = False, condition_tensor = None):
         b, *_, device = *x.shape, x.device
-        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+        model_mean, _, model_log_variance = self.p_mean_variance(x = x, t = t, clip_denoised = clip_denoised, condition_tensor = condition_tensor)
         noise = noise_like(x.shape, device, repeat_noise)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape):
+    def p_sample_loop(self, shape, condition_tensor = None):
         device = self.betas.device
 
         b = shape[0]
         img = torch.randn(shape, device=device)
 
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long))
+            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long), condition_tensor = condition_tensor)
+
         return img
 
     @torch.no_grad()
-    def sample(self, batch_size = 16):
+    def sample(self, batch_size = 16, condition_tensor = None):
+        assert not (self.condition_dim > 0 and not exists(condition_tensor)), 'the conditioning tensor needs to be passed'
+
         image_size = self.image_size
         channels = self.channels
-        return self.p_sample_loop((batch_size, channels, image_size, image_size))
+        return self.p_sample_loop((batch_size, channels, image_size, image_size), condition_tensor = condition_tensor)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -408,7 +442,7 @@ class GaussianDiffusion(nn.Module):
 
         return img
 
-    def q_sample(self, x_start, t, noise=None):
+    def q_sample(self, x_start, t, noise = None):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         return (
@@ -416,11 +450,15 @@ class GaussianDiffusion(nn.Module):
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, noise = None):
+    def p_losses(self, x_start, t, noise = None, condition_tensor = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_noisy = self.q_sample(x_start = x_start, t = t, noise = noise)
+
+        if exists(condition_tensor):
+            x_noisy = broadcat((condition_tensor, x_noisy), dim = 1)
+
         x_recon = self.denoise_fn(x_noisy, t)
 
         if self.loss_type == 'l1':
