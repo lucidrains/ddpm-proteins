@@ -140,34 +140,44 @@ class Downsample(nn.Module):
 
 # building block modules
 
-class Block(nn.Module):
-    def __init__(self, dim, dim_out, groups = 8):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(dim, dim_out, 3, padding=1),
-            nn.GroupNorm(groups, dim_out),
-            Mish()
-        )
-    def forward(self, x):
-        return self.block(x)
-
 class ResnetBlock(nn.Module):
     def __init__(self, dim, dim_out, *, time_emb_dim, groups = 8):
         super().__init__()
+        kernels = ((3, 3), (9, 1), (1, 9))
+        paddings = ((1, 1), (4, 0), (0, 4))
+
         self.mlp = nn.Sequential(
             Mish(),
             nn.Linear(time_emb_dim, dim_out)
         )
 
-        self.block1 = Block(dim, dim_out)
-        self.block2 = Block(dim_out, dim_out)
+        self.blocks_in = nn.ModuleList([])
+        self.blocks_out = nn.ModuleList([])
+
+        for kernel, padding in zip(kernels, paddings):
+            self.blocks_in.append(nn.Sequential(
+                nn.Conv2d(dim, dim_out, kernel, padding = padding),
+                nn.GroupNorm(groups, dim_out),
+                Mish()
+            ))
+
+            self.blocks_out.append(nn.Sequential(
+                nn.Conv2d(dim_out, dim_out, kernel, padding = padding),
+                nn.GroupNorm(groups, dim_out),
+                Mish()
+            ))
+
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
     def forward(self, x, time_emb):
-        h = self.block1(x)
-        h += self.mlp(time_emb)[:, :, None, None]
-        h = self.block2(h)
-        return h + self.res_conv(x)
+        hiddens = [fn(x) for fn in self.blocks_in]
+
+        time_emb = self.mlp(time_emb)
+        time_emb = rearrange(time_emb, 'b c -> b c () ()')
+
+        hiddens = [h + time_emb for h in hiddens]
+        hiddens = [fn(h) for fn, h in zip(self.blocks_out, hiddens)]
+        return sum(hiddens) + self.res_conv(x)
 
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads = 4, dim_head = 32):
@@ -251,7 +261,11 @@ class Unet(nn.Module):
 
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
-            Block(dim, dim),
+            nn.Sequential(
+                nn.Conv2d(dim, dim, 3, padding = 1),
+                nn.GroupNorm(groups, dim),
+                Mish()
+            ),
             nn.Conv2d(dim, out_dim, 1)
         )
 
