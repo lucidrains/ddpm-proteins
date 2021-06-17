@@ -16,6 +16,8 @@ import numpy as np
 from tqdm import tqdm
 from einops import rearrange
 
+from ddpm_proteins.utils import broadcat
+
 try:
     from apex import amp
     APEX_AVAILABLE = True
@@ -53,24 +55,6 @@ def num_to_groups(num, divisor):
     if remainder > 0:
         arr.append(remainder)
     return arr
-
-def broadcat(tensors, dim = -1):
-    num_tensors = len(tensors)
-    shape_lens = set(list(map(lambda t: len(t.shape), tensors)))
-    assert len(shape_lens) == 1, 'tensors must all have the same number of dimensions'
-    shape_len = list(shape_lens)[0]
-
-    dim = (dim + shape_len) if dim < 0 else dim
-    dims = list(zip(*map(lambda t: list(t.shape), tensors)))
-
-    expandable_dims = [(i, val) for i, val in enumerate(dims) if i != dim]
-    assert all([*map(lambda t: len(set(t[1])) <= 2, expandable_dims)]), 'invalid dimensions for broadcastable concatentation'
-    max_dims = list(map(lambda t: (t[0], max(t[1])), expandable_dims))
-    expanded_dims = list(map(lambda t: (t[0], (t[1],) * num_tensors), max_dims))
-    expanded_dims.insert(dim, (dim, dims[dim]))
-    expandable_shapes = list(zip(*map(lambda t: t[1], expanded_dims)))
-    tensors = list(map(lambda t: t[0].expand(*t[1]), zip(tensors, expandable_shapes)))
-    return torch.cat(tensors, dim = dim)
 
 def loss_backwards(fp16, loss, optimizer, **kwargs):
     if fp16:
@@ -141,10 +125,22 @@ class Downsample(nn.Module):
 # building block modules
 
 class ResnetBlock(nn.Module):
-    def __init__(self, dim, dim_out, *, time_emb_dim, groups = 8):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        *,
+        time_emb_dim,
+        hybrid_dim_conv = False,
+        groups = 8
+    ):
         super().__init__()
-        kernels = ((3, 3), (9, 1), (1, 9))
-        paddings = ((1, 1), (4, 0), (0, 4))
+        kernels = ((3, 3),)
+        paddings = ((1, 1),)
+
+        if hybrid_dim_conv:
+            kernels = (*kernels, (9, 1), (1, 9))
+            paddings = (*paddings, (4, 0), (0, 4))
 
         self.mlp = nn.Sequential(
             Mish(),
@@ -212,7 +208,8 @@ class Unet(nn.Module):
         dim_mults=(1, 2, 4, 8),
         groups = 8,
         channels = 3,
-        condition_dim = 0
+        condition_dim = 0,
+        hybrid_dim_conv = False
     ):
         super().__init__()
         self.channels = channels
@@ -234,27 +231,29 @@ class Unet(nn.Module):
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
+        get_resnet_block = partial(ResnetBlock, time_emb_dim = dim, hybrid_dim_conv = hybrid_dim_conv)
+
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
-                ResnetBlock(dim_in, dim_out, time_emb_dim = dim),
-                ResnetBlock(dim_out, dim_out, time_emb_dim = dim),
+                get_resnet_block(dim_in, dim_out),
+                get_resnet_block(dim_out, dim_out),
                 Residual(LinearAttention(dim_out)),
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = dim)
+        self.mid_block1 = get_resnet_block(mid_dim, mid_dim)
         self.mid_attn = Residual(LinearAttention(mid_dim))
-        self.mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim = dim)
+        self.mid_block2 = get_resnet_block(mid_dim, mid_dim)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
 
             self.ups.append(nn.ModuleList([
-                ResnetBlock(dim_out * 2, dim_in, time_emb_dim = dim),
-                ResnetBlock(dim_in, dim_in, time_emb_dim = dim),
+                get_resnet_block(dim_out * 2, dim_in),
+                get_resnet_block(dim_in, dim_in),
                 Residual(LinearAttention(dim_in)),
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))

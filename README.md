@@ -24,20 +24,30 @@ First you need to login
 $ wandb login
 ```
 
-Then
+Then you will need to cache all the MSA attention embeddings by first running
+
+```bash
+$ python cache.py
+```
+
+Finally, you can begin training by invoking
 
 ```bash
 $ python train.py
 ```
 
-Edit `train.py` to whatever for your research desires
+If you would like to clear the cache (by filling in your own MSA fetching function - by default it only feeds in the sequence itself into the MSA transformer), just run
+
+```bash
+$ rm -rf ~/.cache.ddpm-proteins
+```
 
 ## Todo
 
-- [ ] condition on mask
-- [ ] condition on MSA transformers (with caching of tensors in specified directory by protein id)
+- [x] condition on mask
+- [x] condition on MSA transformers (with caching of tensors in specified directory by protein id)
+- [x] all-attention network with uformer https://arxiv.org/abs/2106.03106 (with 1d + 2d conv kernels)
 - [ ] reach for size 384
-- [ ] all-attention network with uformer https://arxiv.org/abs/2106.03106 (with 1d + 2d conv kernels)
 - [ ] add all improvements from https://arxiv.org/abs/2105.05233 and https://cascaded-diffusion.github.io/
 
 ## Usage
