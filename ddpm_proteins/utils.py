@@ -121,7 +121,13 @@ def get_msa_attention_embedding(
 
     cache_full_path = os.path.join(CACHE_PATH, f'{id}.pt')
     if cache and FETCH_FROM_CACHE and os.path.exists(cache_full_path):
-        return torch.load(cache_full_path).to(device)
+        try:
+            loaded = torch.load(cache_full_path).to(device)
+        except:
+            loaded = None
+
+        if exists(loaded):
+            return loaded
 
     msas = default(fetch_msas_fn(aa_str), [])
     seq_with_msas = [aa_str, *msas]
