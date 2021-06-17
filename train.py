@@ -1,3 +1,4 @@
+import os
 import torch
 import sidechainnet as scn
 
@@ -12,6 +13,8 @@ from ddpm_proteins import Unet, GaussianDiffusion
 from ddpm_proteins.utils import save_heatmap, broadcat, get_msa_attention_embeddings, symmetrize, get_msa_transformer, pad_image_to
 
 from einops import rearrange
+
+os.makedirs('./.tmps', exist_ok = True)
 
 # constants
 
@@ -136,8 +139,8 @@ for ind in range(NUM_ITERATIONS):
         sampled = sampled.clamp(0., 1.) * upper_triangular_mask
         sampled = symmetrize(sampled)
 
-        img              = save_heatmap(sampled, './validation.tmp.png', dpi = 100, return_image = True)
-        crossed_mask_img = save_heatmap(crossed_mask[0][0], './mask.tmp.png', dpi = 100, return_image = True)
-        truth_img        = save_heatmap(valid_data[0][0], './truth.tmp.png', dpi = 100, return_image = True)
+        img              = save_heatmap(sampled, './.tmps/validation.png', dpi = 100, return_image = True)
+        crossed_mask_img = save_heatmap(crossed_mask[0][0], './.tmps/mask.png', dpi = 100, return_image = True)
+        truth_img        = save_heatmap(valid_data[0][0], './.tmps/truth.png', dpi = 100, return_image = True)
 
         wandb.log({'sample': wandb.Image(img), 'mask': wandb.Image(crossed_mask_img), 'truth': wandb.Image(truth_img)})

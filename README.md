@@ -36,7 +36,7 @@ Finally, you can begin training by invoking
 $ python train.py
 ```
 
-If you would like to clear the cache (by filling in your own MSA fetching function - by default it only feeds in the sequence itself into the MSA transformer), just run
+If you would like to clear or recompute the cache (ie after changing the fetch MSA function), just run
 
 ```bash
 $ rm -rf ~/.cache.ddpm-proteins

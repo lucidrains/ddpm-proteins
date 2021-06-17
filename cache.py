@@ -20,9 +20,9 @@ LENGTH_THRES = 256
 
 def fetch_msas_fn(aa_str):
     """
-    given a protein as amino acid strings
-    fill in a function that returns the MSAs, also as amino acid strings, as a list
-    as default, return nothing, and just pass the sequence into MSA Transformer by itself
+    given a protein as amino acid string
+    fill in a function that returns the MSAs, as a list of strings
+    (by default, it will return nothing, and only the primary sequence is fed into MSA Transformer)
     """
     return []
 
