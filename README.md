@@ -24,7 +24,7 @@ First you need to login
 $ wandb login
 ```
 
-Then you will need to cache all the MSA attention embeddings by first running
+Then you will need to cache all the MSA attention embeddings by first running. For some reason, the below needs to be done multiple times to cache all the proteins correctly (it does work though). I'll get around to fixing this.
 
 ```bash
 $ python cache.py
