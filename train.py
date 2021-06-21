@@ -23,7 +23,7 @@ IMAGE_SIZE = 256
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATE_EVERY = 8
 LEARNING_RATE = 2e-5
-SAMPLE_EVERY = 100
+SAMPLE_EVERY = 200
 SCALE_DISTANCE_BY = 1e2
 
 # experiment tracker
@@ -91,7 +91,7 @@ for ind in range(NUM_ITERATIONS):
         data.masked_fill_(~crossed_mask.bool(), 0.)
 
         data = pad_image_to(data, IMAGE_SIZE, value = 0.)
-        crossed_mask = pad_image_to(crossed_mask, IMAGE_SIZE, value = -1.)
+        crossed_mask = pad_image_to(crossed_mask, IMAGE_SIZE, value = 0.)
 
         data = (data / SCALE_DISTANCE_BY).clamp(0., 1.)
 
@@ -127,7 +127,7 @@ for ind in range(NUM_ITERATIONS):
         data = pad_image_to(data, IMAGE_SIZE, value = 0.)
         valid_data = (data / SCALE_DISTANCE_BY).clamp(0., 1.)
 
-        crossed_mask = pad_image_to(crossed_mask, IMAGE_SIZE, value = -1.)[:1].float()
+        crossed_mask = pad_image_to(crossed_mask, IMAGE_SIZE, value = 0.)[:1].float()
 
         msa_attention_embeds = get_msa_attention_embeddings(model, batch_converter, seqs[:1], ids[:1])
         msa_attention_embeds = pad_image_to(msa_attention_embeds, IMAGE_SIZE)

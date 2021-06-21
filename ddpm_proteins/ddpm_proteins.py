@@ -1,4 +1,5 @@
 import math
+from math import log, pi
 import copy
 import torch
 from torch import nn, einsum
@@ -14,7 +15,7 @@ from PIL import Image
 
 import numpy as np
 from tqdm import tqdm
-from einops import rearrange
+from einops import rearrange, repeat
 
 from ddpm_proteins.utils import broadcat
 
@@ -175,27 +176,103 @@ class ResnetBlock(nn.Module):
         hiddens = [fn(h) for fn, h in zip(self.blocks_out, hiddens)]
         return sum(hiddens) + self.res_conv(x)
 
+# rotary embeddings
+
+def apply_rotary_emb(q, k, pos_emb):
+    sin, cos = pos_emb
+    dim_rotary = sin.shape[-1]
+    (q, q_pass), (k, k_pass) = map(lambda t: (t[..., :dim_rotary], t[..., dim_rotary:]), (q, k))
+    q, k = map(lambda t: (t * cos) + (rotate_every_two(t) * sin), (q, k))
+    q, k = map(lambda t: torch.cat(t, dim = -1), ((q, q_pass), (k, k_pass)))
+    return q, k
+
+def rotate_every_two(x):
+    x = rearrange(x, '... (d j) -> ... d j', j = 2)
+    x1, x2 = x.unbind(dim = -1)
+    x = torch.stack((-x2, x1), dim = -1)
+    return rearrange(x, '... d j -> ... (d j)')
+
+class AxialRotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_freq = 10):
+        super().__init__()
+        self.dim = dim
+        scales = torch.logspace(0., log(max_freq / 2) / log(2), self.dim // 4, base = 2)
+
+        self.cached_pos_emb = None
+        self.register_buffer('scales', scales)
+
+    def forward(self, x):
+        device, dtype, h, w = x.device, x.dtype, *x.shape[-2:]
+
+        if exists(self.cached_pos_emb):
+            return self.cached_pos_emb
+
+        seq_x = torch.linspace(-1., 1., steps = h, device = device)
+        seq_x = seq_x.unsqueeze(-1)
+
+        seq_y = torch.linspace(-1., 1., steps = w, device = device)
+        seq_y = seq_y.unsqueeze(-1)
+
+        scales = self.scales[(*((None,) * (len(seq_x.shape) - 1)), Ellipsis)]
+        scales = scales.to(x)
+
+        scales = self.scales[(*((None,) * (len(seq_y.shape) - 1)), Ellipsis)]
+        scales = scales.to(x)
+
+        seq_x = seq_x * scales * pi
+        seq_y = seq_y * scales * pi
+
+        x_sinu = repeat(seq_x, 'i d -> i j d', j = w)
+        y_sinu = repeat(seq_y, 'j d -> i j d', i = h)
+
+        sin = torch.cat((x_sinu.sin(), y_sinu.sin()), dim = -1)
+        cos = torch.cat((x_sinu.cos(), y_sinu.cos()), dim = -1)
+
+        sin, cos = map(lambda t: rearrange(t, 'i j d -> i j d'), (sin, cos))
+        sin, cos = map(lambda t: repeat(t, 'i j d -> () (i j) (d r)', r = 2), (sin, cos))
+
+        self.cached_pos_emb = (sin, cos)
+        return sin, cos
+
+# linear attention
+
+def linear_attn_kernel(t):
+    return F.elu(t) + 1
+
+def linear_attention(q, k, v):
+    k_sum = k.sum(dim = -2)
+    D_inv = 1. / torch.einsum('...nd,...d->...n', q, k_sum.type_as(q))
+    context = torch.einsum('...nd,...ne->...de', k, v)
+    out = torch.einsum('...de,...nd,...n->...ne', context, q, D_inv)
+    return out
+
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads = 4, dim_head = 32):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
+
+        self.pos_emb = AxialRotaryEmbedding(dim = dim_head)
         self.norm = nn.InstanceNorm2d(dim, affine = True)
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, h, w, heads = *x.shape, self.heads
         x = self.norm(x)
         q, k, v = self.to_qkv(x).chunk(3, dim = 1)
-        q, k, v = map(lambda t: rearrange(t, 'b (heads c) h w -> b heads c (h w)', heads = self.heads), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h (x y) c', h = heads), (q, k, v))
+
+        sin, cos = self.pos_emb(x)
+        q, k = apply_rotary_emb(q, k, (sin, cos))
+
+        q = linear_attn_kernel(q)
+        k = linear_attn_kernel(k)
         q = q * self.scale
 
-        k = k.softmax(dim=-1)
-        context = torch.einsum('bhdn,bhen->bhde', k, v)
-        out = torch.einsum('bhde,bhdn->bhen', context, q)
-        out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)
+        out = linear_attention(q, k, v)
+        out = rearrange(out, 'b h (x y) c -> b (h c) x y', h = heads, x = h, y = w)
         return self.to_out(out)
 
 # model
@@ -209,7 +286,8 @@ class Unet(nn.Module):
         groups = 8,
         channels = 3,
         condition_dim = 0,
-        hybrid_dim_conv = False
+        hybrid_dim_conv = False,
+
     ):
         super().__init__()
         self.channels = channels
@@ -234,12 +312,13 @@ class Unet(nn.Module):
         get_resnet_block = partial(ResnetBlock, time_emb_dim = dim, hybrid_dim_conv = hybrid_dim_conv)
 
         for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_first = ind == 0
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
                 get_resnet_block(dim_in, dim_out),
                 get_resnet_block(dim_out, dim_out),
-                Residual(LinearAttention(dim_out)),
+                Residual(LinearAttention(dim_out)) if not is_first else nn.Identity(),
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
@@ -254,7 +333,7 @@ class Unet(nn.Module):
             self.ups.append(nn.ModuleList([
                 get_resnet_block(dim_out * 2, dim_in),
                 get_resnet_block(dim_in, dim_in),
-                Residual(LinearAttention(dim_in)),
+                Residual(LinearAttention(dim_in)) if not is_last else nn.Identity(),
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
@@ -403,7 +482,7 @@ class GaussianDiffusion(nn.Module):
         x_recon = self.predict_start_from_noise(x, t = t, noise = denoise_model_output)
 
         if clip_denoised:
-            x_recon.clamp_(-1., 1.)
+            x_recon.clamp_(0., 1.)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
