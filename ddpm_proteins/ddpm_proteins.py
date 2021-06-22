@@ -318,7 +318,7 @@ class Unet(nn.Module):
             self.downs.append(nn.ModuleList([
                 get_resnet_block(dim_in, dim_out),
                 get_resnet_block(dim_out, dim_out),
-                Residual(LinearAttention(dim_out)) if not is_first else nn.Identity(),
+                Residual(LinearAttention(dim_out)),
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
@@ -333,7 +333,7 @@ class Unet(nn.Module):
             self.ups.append(nn.ModuleList([
                 get_resnet_block(dim_out * 2, dim_in),
                 get_resnet_block(dim_in, dim_in),
-                Residual(LinearAttention(dim_in)) if not is_last else nn.Identity(),
+                Residual(LinearAttention(dim_in)),
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
