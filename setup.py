@@ -20,6 +20,7 @@ setup(
     'numpy',
     'pillow',
     'proDy',
+    'scipy',
     'sidechainnet',
     'seaborn',
     'torch',
