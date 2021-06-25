@@ -19,6 +19,7 @@ setup(
     'matplotlib',
     'numpy',
     'pillow',
+    'proDy',
     'sidechainnet',
     'seaborn',
     'torch',
