@@ -246,6 +246,18 @@ def linear_attention(q, k, v):
     out = torch.einsum('...de,...nd,...n->...ne', context, q, D_inv)
     return out
 
+class LayerNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        self.b = nn.Parameter(torch.zeros(1, dim, 1, 1))
+
+    def forward(self, x):
+        std = torch.var(x, dim = 1, unbiased = False, keepdim = True).sqrt()
+        mean = torch.mean(x, dim = 1, keepdim = True)
+        return (x - mean) / (std + self.eps) * self.g + self.b
+
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads = 4, dim_head = 32):
         super().__init__()
@@ -254,7 +266,7 @@ class LinearAttention(nn.Module):
         hidden_dim = dim_head * heads
 
         self.pos_emb = AxialRotaryEmbedding(dim = dim_head)
-        self.norm = nn.InstanceNorm2d(dim, affine = True)
+        self.norm = LayerNorm(dim)
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
